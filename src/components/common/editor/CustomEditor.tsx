@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useCallback } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import ReactQuill from "react-quill-new";
 import "react-quill-new/dist/quill.snow.css";
 import { uploadImg } from "@/api/client";
@@ -18,8 +18,8 @@ export default function CustomEditor({ value, onChange, quillRef, imageHandler }
     const showLoading = useLoadingStore((s) => s.show);
     const hideLoading = useLoadingStore((s) => s.hide);
 
-    // 이미지 업로드 로직 메모이제이션 (중복 생성 방지)
-    const uploadImage = useCallback(async (file: File) => {
+    const uploadImageRef = useRef<(file: File) => Promise<void>>(null!);
+    uploadImageRef.current = async (file: File) => {
         try {
             showLoading();
             const response = await uploadImg(file);
@@ -27,18 +27,16 @@ export default function CustomEditor({ value, onChange, quillRef, imageHandler }
             const quill = quillRef.current?.getEditor();
             if (quill) {
                 const range = quill.getSelection();
-                // 커서 위치가 없으면 맨 마지막에 삽입
                 const index = range ? range.index : quill.getLength();
-                quill.insertEmbed(index, 'image', imageUrl);
-                // 삽입 후 커서를 이미지 다음으로 이동
+                quill.insertEmbed(index, "image", imageUrl);
                 quill.setSelection(index + 1, 0);
             }
         } catch (error) {
-            Swal.fire('이미지 업로드 실패');
+            Swal.fire("이미지 업로드 실패");
         } finally {
             hideLoading();
         }
-    }, [showLoading, hideLoading, quillRef]);
+    };
 
     const modules = useMemo(() => ({
         toolbar: {
@@ -48,25 +46,24 @@ export default function CustomEditor({ value, onChange, quillRef, imageHandler }
                 ["image", "link"],
                 ["clean"],
             ],
-            handlers: {
-                image: imageHandler,
-            },
+            handlers: { image: imageHandler },
         },
+        // ✅ clipboard matcher는 유지 (blob delta 혹시라도 생기면 차단)
         clipboard: {
             matchers: [
                 [
                     Node.ELEMENT_NODE,
-                    (node: Element, delta: unknown) => {
-                        // blob: URL로 삽입되는 이미지 ops 제거
+                    (_node: Element, delta: unknown) => {
                         const d = delta as { ops: Array<{ insert?: unknown }> };
                         d.ops = d.ops.filter((op) => {
                             if (op.insert && typeof op.insert === "object") {
-                                const insert = op.insert as Record<string, unknown>;
-                                if (
-                                    typeof insert.image === "string" &&
-                                    insert.image.startsWith("blob:")
-                                ) {
-                                    return false; // blob 이미지 차단
+                                const ins = op.insert as Record<string, unknown>;
+                                if (typeof ins.image === "string") {
+                                    const src = ins.image;
+                                    if (src.startsWith("blob:") || src.startsWith("data:")) {
+                                        console.log("[matcher] blob/base64 차단:", src.slice(0, 60));
+                                        return false;
+                                    }
                                 }
                             }
                             return true;
@@ -79,31 +76,43 @@ export default function CustomEditor({ value, onChange, quillRef, imageHandler }
     }), [imageHandler]);
 
     useEffect(() => {
+        // ✅ document 레벨 capture — Quill보다 무조건 먼저 실행됨
         const handlePaste = (e: ClipboardEvent) => {
+            const target = e.target as HTMLElement;
+
+            // ✅ 이벤트가 이 에디터의 ql-editor 안에서 발생한 경우만 처리
+            const editorRoot = quillRef.current?.getEditor()?.root;
+            if (!editorRoot) return;
+            if (!editorRoot.contains(target) && editorRoot !== target) return;
+
+            console.log("[CustomEditor] document paste 감지 (capture)");
+
             const items = e.clipboardData?.items;
             if (!items) return;
 
+            console.log("[CustomEditor] items:", Array.from(items).map(i => `${i.kind}:${i.type}`));
+
             for (let i = 0; i < items.length; i++) {
                 if (items[i].type.startsWith("image/")) {
+                    console.log("[CustomEditor] 이미지 감지 → 업로드 처리");
                     e.preventDefault();
                     e.stopImmediatePropagation();
                     const file = items[i].getAsFile();
-                    if (file) void uploadImage(file);
+                    if (file) void uploadImageRef.current(file);
                     return;
                 }
             }
         };
 
-        // ReactQuill은 마운트 후 바로 getEditor() 가능
-        const editor = quillRef.current?.getEditor();
-        if (!editor?.root) return;
-
-        editor.root.addEventListener("paste", handlePaste, true); // capture phase
+        // ✅ document에 capture로 등록 → Quill보다 먼저 실행
+        document.addEventListener("paste", handlePaste, true);
+        console.log("[CustomEditor] document paste 리스너 등록");
 
         return () => {
-            editor.root.removeEventListener("paste", handlePaste, true);
+            document.removeEventListener("paste", handlePaste, true);
+            console.log("[CustomEditor] document paste 리스너 제거");
         };
-    }, [quillRef, uploadImage]); // uploadImage가 안정적이므로 한 번만 실행됨
+    }, []);
 
     return (
         <ReactQuill
@@ -114,7 +123,7 @@ export default function CustomEditor({ value, onChange, quillRef, imageHandler }
             onChange={onChange}
             placeholder="상세 내용을 입력해주세요."
             className="mt8"
-            style={{ height: "250px", marginBottom: "60px" }} // 높이 살짝 조절
+            style={{ height: "250px", marginBottom: "60px" }}
         />
     );
 }
