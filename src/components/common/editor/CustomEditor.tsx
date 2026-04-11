@@ -52,16 +52,39 @@ export default function CustomEditor({ value, onChange, quillRef, imageHandler }
                 image: imageHandler,
             },
         },
+        clipboard: {
+            matchers: [
+                [
+                    Node.ELEMENT_NODE,
+                    (node: Element, delta: unknown) => {
+                        // blob: URL로 삽입되는 이미지 ops 제거
+                        const d = delta as { ops: Array<{ insert?: unknown }> };
+                        d.ops = d.ops.filter((op) => {
+                            if (op.insert && typeof op.insert === "object") {
+                                const insert = op.insert as Record<string, unknown>;
+                                if (
+                                    typeof insert.image === "string" &&
+                                    insert.image.startsWith("blob:")
+                                ) {
+                                    return false; // blob 이미지 차단
+                                }
+                            }
+                            return true;
+                        });
+                        return d;
+                    },
+                ],
+            ],
+        },
     }), [imageHandler]);
 
     useEffect(() => {
-        // 핸들러 선언 (메모리 누수 방지를 위해 내부에 선언하거나 useCallback 권장)
         const handlePaste = (e: ClipboardEvent) => {
             const items = e.clipboardData?.items;
             if (!items) return;
 
             for (let i = 0; i < items.length; i++) {
-                if (items[i].type.indexOf("image") !== -1) {
+                if (items[i].type.startsWith("image/")) {
                     e.preventDefault();
                     e.stopImmediatePropagation();
                     const file = items[i].getAsFile();
@@ -71,38 +94,16 @@ export default function CustomEditor({ value, onChange, quillRef, imageHandler }
             }
         };
 
-        const checkEditor = setInterval(() => {
-            try {
-                // 1. Ref가 존재하는지 먼저 확인
-                if (!quillRef.current) return;
+        // ReactQuill은 마운트 후 바로 getEditor() 가능
+        const editor = quillRef.current?.getEditor();
+        if (!editor?.root) return;
 
-                // 2. getEditor() 호출 시도 (여기서 에러가 발생하므로 try로 감쌈)
-                const editor = quillRef.current.getEditor();
-
-                if (editor && editor.root) {
-                    editor.root.removeEventListener("paste", handlePaste, true);
-                    editor.root.addEventListener("paste", handlePaste, true);
-                    clearInterval(checkEditor); // 성공하면 인터벌 종료
-                }
-            } catch (e) {
-                // 아직 에디터가 준비 안 됨 (Accessing non-instantiated editor)
-                // 무시하고 다음 인터벌을 기다림
-            }
-        }, 200);
+        editor.root.addEventListener("paste", handlePaste, true); // capture phase
 
         return () => {
-            clearInterval(checkEditor);
-            try {
-                const editor = quillRef.current?.getEditor();
-                if (editor) {
-                    editor.root.removeEventListener("paste", handlePaste, true);
-                }
-            } catch (e) {
-                // 종료 시 에러 무시
-            }
+            editor.root.removeEventListener("paste", handlePaste, true);
         };
-    }, [quillRef, uploadImage]);
-// ↑ quillRef.current 자체가 설정되었을 때 리스너를 붙이도록 변경
+    }, [quillRef, uploadImage]); // uploadImage가 안정적이므로 한 번만 실행됨
 
     return (
         <ReactQuill
